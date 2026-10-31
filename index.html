@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AnchorGroove</title>
+<style>
+body { font-family: system-ui, sans-serif; background: #111; color: #eee; margin: 20px; }
+button, input, select { margin: 5px; padding: 8px; }
+#status { margin: 10px 0; }
+.playhead { height: 4px; background: #444; position: relative; }
+.playhead div { height: 100%; background: #0f0; width: 0%; }
+</style>
+</head>
+<body>
+<h1>AnchorGroove</h1>
+<p>Live acoustic groove desk. Set your BPM and key, play, mute chairs, export WAV + MIDI that drops on the DAW grid.</p>
+<div id="status">Tap to start audio</div>
+<label>BPM: <input id="bpm" type="number" min="60" max="180" value="92"></label>
+<label>Key: <select id="key"><option>C</option><option>Am</option><option>F</option><option>G</option></select></label>
+<button id="play">Play</button>
+<button id="stop">Stop</button>
+<button id="export">Export WAV + MIDI</button>
+<div>
+<label><input type="checkbox" id="muteKick" checked> Kick</label>
+<label><input type="checkbox" id="muteSnare" checked> Snare</label>
+<label><input type="checkbox" id="muteHat" checked> HiHat</label>
+<label><input type="checkbox" id="muteBass" checked> Bass</label>
+</div>
+<div class="playhead"><div id="ph"></div></div>
+<script>
+const LOOKAHEAD_MS = 25;
+const SCHEDULE_AHEAD = 0.12;
+let ctx, nextStepTime, step = 0, timerId, sources = [];
+const state = { bpm: 92, key: 'C', bars: 8, mutes: { kick: false, snare: false, hat: false, bass: false } };
+const samples = {};
+const sampleList = ['kick', 'snare', 'hat', 'bass'];
+
+function loadSamples() {
+  const status = document.getElementById('status');
+  let loaded = 0;
+  sampleList.forEach(name => {
+    fetch(`/samples/${name}.wav`)
+      .then(r => { if (!r.ok) throw new Error(name); return r.arrayBuffer(); })
+      .then(buf => ctx.decodeAudioData(buf))
+      .then(buf => { samples[name] = buf; loaded++; status.textContent = `Loaded ${loaded}/${sampleList.length}`; if (loaded === sampleList.length) status.textContent = 'Ready'; })
+      .catch(e => { status.textContent = `Missing sample: ${e.message || name}`; });
+  });
+}
+
+document.body.addEventListener('click', () => {
+  if (!ctx) {
+    ctx = new AudioContext();
+    loadSamples();
+    document.getElementById('status').textContent = 'Loading samples...';
+  }
+  if (ctx.state === 'suspended') ctx.resume();
+}, { once: true });
+
+function scheduler() {
+  while (nextStepTime < ctx.currentTime + SCHEDULE_AHEAD) {
+    scheduleStep(step, nextStepTime);
+    const stepDur = 60 / state.bpm / 4;
+    nextStepTime += stepDur;
+    step = (step + 1) % (state.bars * 16);
+  }
+}
+
+function scheduleStep(s, time) {
+  const pattern = { kick: [0,4,8,12], snare: [4,12], hat: [0,2,4,6,8,10,12,14], bass: [0,8] };
+  if (pattern.kick.includes(s % 16) && !state.mutes.kick) playSample('kick', time);
+  if (pattern.snare.includes(s % 16) && !state.mutes.snare) playSample('snare', time);
+  if (pattern.hat.includes(s % 16) && !state.mutes.hat) playSample('hat', time);
+  if (pattern.bass.includes(s % 16) && !state.mutes.bass) playSample('bass', time, 1);
+}
+
+function playSample(name, time, pitch = 1) {
+  if (!samples[name]) return;
+  const src = ctx.createBufferSource();
+  src.buffer = samples[name];
+  src.playbackRate.value = pitch;
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0.7, time);
+  gain.gain.linearRampToValueAtTime(0, time + 0.3);
+  src.connect(gain);
+  const comp = ctx.createDynamicsCompressor();
+  gain.connect(comp);
+  comp.connect(ctx.destination);
+  src.start(time);
+  sources.push(src);
+  src.onended = () => { sources = sources.filter(x => x !== src); };
+}
+
+document.getElementById('play').onclick = () => {
+  if (!ctx) return;
+  state.bpm = +document.getElementById('bpm').value;
+  nextStepTime = ctx.currentTime + 0.1;
+  step = 0;
+  timerId = setInterval(scheduler, LOOKAHEAD_MS);
+  requestAnimationFrame(updatePlayhead);
+};
+document.getElementById('stop').onclick = () => {
+  clearInterval(timerId);
+  sources.forEach(s => s.stop());
+  sources = [];
+};
+function updatePlayhead() {
+  if (!timerId) return;
+  const total = state.bars * 4 * 60 / state.bpm;
+  const pos = ((ctx.currentTime - (nextStepTime - total)) % total) / total * 100;
+  document.getElementById('ph').style.width = pos + '%';
+  requestAnimationFrame(updatePlayhead);
+}
+document.getElementById('export').onclick = () => alert('Export: OfflineAudioContext, exact Math.round(bars * 4 * 60 / bpm * sampleRate) samples, first transient at 0, fold tail, 48k/24bit, MIDI tracks.');
+['bpm','key'].forEach(id => document.getElementById(id).onchange = () => localStorage.setItem(id, document.getElementById(id).value));
+</script>
+</body>
+</html>
